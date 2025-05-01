@@ -1,55 +1,115 @@
+import pandas as pd
 import streamlit as st
-from analyzer import is_phishing, analyze_email_content
-from email_utils import fetch_emails
+import joblib
+import re
+import string
+import logging
 
-st.set_page_config(page_title="Phishing Analyzer", page_icon="✉️", layout="centered")
-st.title("📨 Phishing Analyzer")
-st.caption("Analyze incoming emails using both heuristics and AI.")
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 
-# API Key Setup
-api_key = st.secrets["OPENAI_API_KEY"] if "OPENAI_API_KEY" in st.secrets else st.text_input("Enter your OpenAI API Key")
+# Set page configuration
+st.set_page_config(
+    page_title="Phishing Email Detector",
+    page_icon="📧",
+    layout="centered",
+    initial_sidebar_state="auto",
+)
 
-# Email Fetching
-st.subheader("📬 Analyze Your Inbox")
+# Custom CSS for styling
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f0f2f6;
+    }
+    .stButton>button {
+        background-color: #4CAF50;
+        color: white;
+    }
+    .stTextArea textarea {
+        background-color: #ffffff;
+        color: #000000;
+    }
+    .stAlert {
+        background-color: #ffcccb;
+        color: #000000;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-if st.button("Fetch & Analyze Emails"):
-    try:
-        with st.spinner("Connecting to your inbox..."):
-            email_user = st.secrets["EMAIL_ADDRESS"]
-            email_pass = st.secrets["EMAIL_PASSWORD"]
-            fetched = fetch_emails(email_user, email_pass)
+# Load trained model and TF-IDF vectorizer with error handling
+try:
+    model = joblib.load("phishing_detector_model.pkl")
+    vectorizer = joblib.load("tfidf_vectorizer.pkl")
+except Exception as e:
+    st.error("Error loading model or vectorizer. Please check the files.")
+    logging.error(f"Error loading model/vectorizer: {e}")
+    st.stop()
 
-        if not fetched:
-            st.warning("No emails found or failed to fetch.")
+# Cleaning function
+def clean_email(text):
+    if pd.isna(text):
+        return ""
+    text = re.sub(r"<.*?>", " ", text)
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    text = text.lower()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+# Callback function to clear the text area
+def clear_text():
+    st.session_state.email_input = ""
+
+# Streamlit UI
+st.title("📧 Phishing Email Detector")
+
+# Initialize session state for email input
+if "email_input" not in st.session_state:
+    st.session_state.email_input = ""
+
+# Buttons first
+col1, col2, col3 = st.columns([1, 1, 1])
+
+with col1:
+    analyze_button = st.button("🔍 Analyze Email", type="primary")
+with col2:
+    clear_button = st.button("🧹 Clear", on_click=clear_text)
+with col3:
+    sample_button = st.button("📋 Load Sample Email")
+
+# Handle button clicks BEFORE rendering text_area
+if sample_button:
+    st.session_state.email_input = """Dear User,
+
+Your account has been flagged for suspicious activity. Please click the link below to verify your identity and avoid service interruption.
+
+Verify Now: http://suspicious-link.com
+
+Thank you,
+Support Team
+"""
+
+# Input field - created AFTER session state is updated
+email_input = st.text_area(
+    "Paste the email content here:",
+    value=st.session_state.email_input,
+    height=300,
+    key="email_input",
+    help="Enter the full email you want to analyze."
+)
+
+# Main functionality
+if analyze_button:
+    if email_input.strip() == "":
+        st.warning("Please enter email content to analyze.")
+    else:
+        cleaned_input = clean_email(email_input)
+        transformed_input = vectorizer.transform([cleaned_input])
+        prediction = model.predict(transformed_input)[0]
+
+        if prediction == 1.0:
+            st.error("⚠️ This email is likely a phishing attempt!")
         else:
-            for i, (subject, body) in enumerate(fetched):
-                with st.expander(f"✉️ Email {i+1}: {subject}", expanded=False):
-                    st.markdown("##### 📝 Preview:")
-                    st.code(body[:1000] + ("..." if len(body) > 1000 else ""), language="markdown")
+            st.success("✅ This email appears to be safe.")
 
-                    # GPT Analysis
-                    gpt_result = analyze_email_content(body, openai_api_key=api_key)
-                    st.info(f"**🤖 GPT Verdict:** {gpt_result}")
-
-                    # Heuristic Check
-                    if is_phishing(body):
-                        st.error("⚠️ Heuristic: This email might be phishing.")
-                    else:
-                        st.success("✅ Heuristic: This email looks safe.")
-
-    except Exception as e:
-        st.error(f"Something went wrong while fetching or analyzing emails:\n\n`{e}`")
-
-# Manual Analysis Section
-st.subheader("🔍 Manual Email Check")
-email_content = st.text_area("Paste the email content here:")
-
-if st.button("Analyze"):
-    with st.spinner("Analyzing email..."):
-        gpt_result = analyze_email_content(email_content, openai_api_key=api_key)
-        st.info(f"**🤖 GPT Verdict:** {gpt_result}")
-
-        if is_phishing(email_content):
-            st.error("⚠️ Heuristic: This email might be phishing.")
-        else:
-            st.success("✅ Heuristic: This email looks safe.")
+        logging.info(f"Email analyzed: {email_input}")
